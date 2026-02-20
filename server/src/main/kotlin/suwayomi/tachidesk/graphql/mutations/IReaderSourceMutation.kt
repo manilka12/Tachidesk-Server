@@ -8,6 +8,7 @@
 package suwayomi.tachidesk.graphql.mutations
 
 import com.expediagroup.graphql.generator.annotations.GraphQLDescription
+import com.expediagroup.graphql.generator.annotations.GraphQLDeprecated
 import graphql.execution.DataFetcherResult
 import ireader.core.source.model.ChapterInfo
 import ireader.core.source.model.MangasPageInfo
@@ -173,12 +174,20 @@ class IReaderSourceMutation {
 
     data class FetchIReaderChaptersInput(
         val clientMutationId: String? = null,
-        @GraphQLDescription("Source ID (required if using novelUrl)")
-        val source: Long? = null,
-        @GraphQLDescription("Novel URL/key from the source (provide this OR novelId)")
-        val novelUrl: String? = null,
-        @GraphQLDescription("Database novel ID (provide this OR novelUrl + source)")
+        @GraphQLDescription("Database novel ID (preferred)")
         val novelId: Int? = null,
+        @GraphQLDeprecated(
+            message = "Use novelId instead",
+            replaceWith = ReplaceWith("novelId"),
+        )
+        @GraphQLDescription("Source ID (legacy fallback, requires existing persisted novel)")
+        val source: Long? = null,
+        @GraphQLDeprecated(
+            message = "Use novelId instead",
+            replaceWith = ReplaceWith("novelId"),
+        )
+        @GraphQLDescription("Novel URL/key (legacy fallback, requires existing persisted novel)")
+        val novelUrl: String? = null,
     )
 
     data class FetchIReaderChaptersPayload(
@@ -189,31 +198,35 @@ class IReaderSourceMutation {
     @RequireAuth
     @GraphQLDescription("Fetch chapters for a novel from an IReader source")
     fun fetchIReaderChapters(input: FetchIReaderChaptersInput): CompletableFuture<DataFetcherResult<FetchIReaderChaptersPayload?>> {
-        val (clientMutationId, source, novelUrl, novelId) = input
+        val (clientMutationId, novelId, sourceId, novelUrl) = input
 
         return future {
             asDataFetcherResult {
-                val (resolvedNovelId, resolvedSourceId, resolvedNovelUrl) =
-                    when {
-                        novelId != null -> {
-                            // Look up novel from database
-                            val novel =
-                                transaction {
-                                    IReaderNovelTable
-                                        .selectAll()
-                                        .where { IReaderNovelTable.id eq novelId }
-                                        .firstOrNull()
-                                } ?: throw IllegalArgumentException("Novel with ID $novelId not found")
-                            Triple(novelId, novel[IReaderNovelTable.sourceReference], novel[IReaderNovelTable.url])
+                val novel =
+                    transaction {
+                        when {
+                            novelId != null -> {
+                                IReaderNovelTable
+                                    .selectAll()
+                                    .where { IReaderNovelTable.id eq novelId }
+                                    .firstOrNull()
+                            }
+                            sourceId != null && !novelUrl.isNullOrBlank() -> {
+                                IReaderNovelTable
+                                    .selectAll()
+                                    .where {
+                                        (IReaderNovelTable.sourceReference eq sourceId) and
+                                            (IReaderNovelTable.url eq novelUrl)
+                                    }.firstOrNull()
+                            }
+                            else -> null
                         }
-                        novelUrl != null && source != null -> {
-                            require(novelUrl.isNotBlank()) { "Novel URL cannot be empty" }
-                            // Find or create the novel in the database
-                            val dbNovelId = findOrCreateNovel(source, novelUrl)
-                            Triple(dbNovelId, source, novelUrl)
-                        }
-                        else -> throw IllegalArgumentException("Either novelId OR (novelUrl + source) must be provided")
-                    }
+                    } ?: throw IllegalArgumentException("Provide novelId or an existing persisted novel via source + novelUrl")
+
+                val resolvedNovelId = novel[IReaderNovelTable.id].value
+
+                val resolvedSourceId = novel[IReaderNovelTable.sourceReference]
+                val resolvedNovelUrl = novel[IReaderNovelTable.url]
 
                 val chapterInfos = IReaderNovel.getChapterList(resolvedSourceId, resolvedNovelUrl)
 
@@ -234,31 +247,6 @@ class IReaderSourceMutation {
             }
         }
     }
-
-    /**
-     * Find an existing novel by URL and source, or create a placeholder
-     */
-    private fun findOrCreateNovel(
-        sourceId: Long,
-        novelUrl: String,
-    ): Int =
-        transaction {
-            val existing =
-                IReaderNovelTable
-                    .selectAll()
-                    .where {
-                        (IReaderNovelTable.sourceReference eq sourceId) and
-                            (IReaderNovelTable.url eq novelUrl)
-                    }.firstOrNull()
-
-            existing?.get(IReaderNovelTable.id)?.value
-                ?: IReaderNovelTable
-                    .batchInsert(listOf(novelUrl)) { url ->
-                        this[IReaderNovelTable.url] = url
-                        this[IReaderNovelTable.title] = "" // Will be populated when details are fetched
-                        this[IReaderNovelTable.sourceReference] = sourceId
-                    }.first()[IReaderNovelTable.id].value
-        }
 
     /**
      * Insert or update chapters in the database and return the list with database IDs
@@ -329,12 +317,20 @@ class IReaderSourceMutation {
 
     data class FetchIReaderChapterContentInput(
         val clientMutationId: String? = null,
-        @GraphQLDescription("Source ID (required if using chapterUrl)")
-        val source: Long? = null,
-        @GraphQLDescription("Chapter URL/key from the source (provide this OR chapterId)")
-        val chapterUrl: String? = null,
-        @GraphQLDescription("Database chapter ID (provide this OR chapterUrl + source)")
+        @GraphQLDescription("Database chapter ID (preferred)")
         val chapterId: Int? = null,
+        @GraphQLDeprecated(
+            message = "Use chapterId instead",
+            replaceWith = ReplaceWith("chapterId"),
+        )
+        @GraphQLDescription("Source ID (legacy fallback, requires existing persisted chapter)")
+        val source: Long? = null,
+        @GraphQLDeprecated(
+            message = "Use chapterId instead",
+            replaceWith = ReplaceWith("chapterId"),
+        )
+        @GraphQLDescription("Chapter URL/key (legacy fallback, requires existing persisted chapter)")
+        val chapterUrl: String? = null,
     )
 
     data class FetchIReaderChapterContentPayload(
@@ -345,29 +341,34 @@ class IReaderSourceMutation {
     @RequireAuth
     @GraphQLDescription("Fetch content/pages for a chapter from an IReader source")
     fun fetchIReaderChapterContent(input: FetchIReaderChapterContentInput): CompletableFuture<DataFetcherResult<FetchIReaderChapterContentPayload?>> {
-        val (clientMutationId, source, chapterUrl, chapterId) = input
+        val (clientMutationId, chapterId, sourceId, chapterUrl) = input
 
         return future {
             asDataFetcherResult {
-                val (resolvedSourceId, resolvedChapterUrl) =
-                    when {
-                        chapterId != null -> {
-                            // Look up chapter from database and get source from associated novel
-                            val chapterWithNovel =
-                                transaction {
-                                    (IReaderChapterTable innerJoin IReaderNovelTable)
-                                        .selectAll()
-                                        .where { IReaderChapterTable.id eq chapterId }
-                                        .firstOrNull()
-                                } ?: throw IllegalArgumentException("Chapter with ID $chapterId not found")
-                            chapterWithNovel[IReaderNovelTable.sourceReference] to chapterWithNovel[IReaderChapterTable.url]
+                // Look up chapter from database and get source from associated novel
+                val chapterWithNovel =
+                    transaction {
+                        when {
+                            chapterId != null -> {
+                                (IReaderChapterTable innerJoin IReaderNovelTable)
+                                    .selectAll()
+                                    .where { IReaderChapterTable.id eq chapterId }
+                                    .firstOrNull()
+                            }
+                            sourceId != null && !chapterUrl.isNullOrBlank() -> {
+                                (IReaderChapterTable innerJoin IReaderNovelTable)
+                                    .selectAll()
+                                    .where {
+                                        (IReaderNovelTable.sourceReference eq sourceId) and
+                                            (IReaderChapterTable.url eq chapterUrl)
+                                    }.firstOrNull()
+                            }
+                            else -> null
                         }
-                        chapterUrl != null && source != null -> {
-                            require(chapterUrl.isNotBlank()) { "Chapter URL cannot be empty" }
-                            source to chapterUrl
-                        }
-                        else -> throw IllegalArgumentException("Either chapterId OR (chapterUrl + source) must be provided")
-                    }
+                    } ?: throw IllegalArgumentException("Provide chapterId or an existing persisted chapter via source + chapterUrl")
+
+                val resolvedSourceId = chapterWithNovel[IReaderNovelTable.sourceReference]
+                val resolvedChapterUrl = chapterWithNovel[IReaderChapterTable.url]
 
                 val pages = IReaderNovel.getChapterContent(resolvedSourceId, resolvedChapterUrl)
 
